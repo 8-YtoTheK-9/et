@@ -148,14 +148,16 @@
 <div class="hinweis" id="status">Verbindungen werden geladen.</div>
 
 <footer>
-  <span>Daten: transport.opendata.ch</span>
+  <span id="quelle">Daten werden geladen</span>
   <button type="button" id="aktualisieren">Aktualisieren</button>
 </footer>
 
 <script>
 (function(){
-  var HALT_A = "Triesen, Schule";
-  var HALT_B_VARIANTEN = ["Eschen, Kohlplatz", "Eschen FL, Kohlplatz", "Kohlplatz"];
+  var HALT_A = "Eschen, Kohlplatz";
+  var HALT_B_VARIANTEN = ["Triesen, Schule", "Triesen FL, Schule", "Triesen, Schulzentrum"];
+  // Adresse des Vermittlerdienstes, leer lassen für den Direktzugriff
+  var VERMITTLER = "https://fahrplan-mv.yavuz-kaya89.workers.dev/";
   var ANZAHL = 5;
   var TAKT = 120000;
 
@@ -164,11 +166,14 @@
     "12": "#fcc300",
     "13": "#45a12b",
     "13E": "#45a12b",
-    "14": "#45a12b"
+    "14": "#45a12b",
+    "40": "#6f6352",
+    "41": "#6f6352"
   };
   var STANDARDFARBE = "#45a12b";
 
   var richtungHin = true;
+  var quelle = "";
 
   var liste = document.getElementById("liste");
   var status = document.getElementById("status");
@@ -199,26 +204,28 @@
     return treffer ? treffer[0] : String(text);
   }
 
-  // Quelle 1: search.ch, mit Echtzeitverspaetungen
-  function holenSearch(von, nach){
-    var url = "https://search.ch/timetable/api/route.json"
-      + "?from=" + encodeURIComponent(von)
+  // Quelle 1: offizielle Schnittstelle OJP 2.0 über den eigenen Vermittler
+  function holenOjp(von, nach){
+    if(!VERMITTLER){ return Promise.reject(new Error("kein Vermittler")); }
+    var url = VERMITTLER
+      + (VERMITTLER.indexOf("?") >= 0 ? "&" : "?") + "from=" + encodeURIComponent(von)
       + "&to=" + encodeURIComponent(nach)
-      + "&show_delays=1&num=" + ANZAHL;
+      + "&num=" + ANZAHL;
     return fetch(url).then(function(a){
       if(!a.ok){ throw new Error("HTTP " + a.status); }
       return a.json();
     }).then(function(d){
-      if(!d || !d.connections || !d.connections.length){ throw new Error("leer"); }
-      return d.connections.map(function(v){
-        var fahrten = (v.legs || []).filter(function(l){ return l.type !== "walk" && l.departure && (l.line || l.name); });
-        var erste = fahrten[0] || (v.legs || [])[0] || {};
+      if(!d || !d.verbindungen || !d.verbindungen.length){ throw new Error("leer"); }
+      quelle = "Echtzeit (OJP)";
+      return d.verbindungen.map(function(v){
         return {
-          ab: datumAus(v.departure),
-          an: datumAus(v.arrival),
-          verspaetung: verspaetungAus(v.dep_delay),
-          linie: linieAusText(erste.line || erste.name || erste.number),
-          umstiege: Math.max(fahrten.length - 1, 0)
+          ab: new Date(v.abfahrt),
+          an: new Date(v.ankunft),
+          verspaetung: v.verspaetung || 0,
+          linie: String(v.linie || "Bus"),
+          farbe: null,
+          schrift: null,
+          umstiege: v.umstiege || 0
         };
       });
     });
@@ -235,6 +242,7 @@
       return a.json();
     }).then(function(d){
       if(!d || !d.connections || !d.connections.length){ throw new Error("leer"); }
+      quelle = "Sollzeiten (opendata.ch)";
       return d.connections.map(function(v){
         var abschnitt = (v.sections || []).find(function(s){ return s.journey; });
         var journey = abschnitt && abschnitt.journey ? abschnitt.journey : {};
@@ -255,7 +263,7 @@
     var b = HALT_B_VARIANTEN[i];
     var von = richtungHin ? HALT_A : b;
     var nach = richtungHin ? b : HALT_A;
-    return holenSearch(von, nach)
+    return holenOjp(von, nach)
       .catch(function(){ return holenOpendata(von, nach); })
       .catch(function(){ return holen(i + 1); });
   }
@@ -286,7 +294,8 @@
       var badge = document.createElement("span");
       badge.className = "linie";
       badge.textContent = f.linie;
-      badge.style.background = LINIENFARBEN[String(f.linie)] || STANDARDFARBE;
+      badge.style.background = f.farbe || LINIENFARBEN[String(f.linie)] || STANDARDFARBE;
+      if(f.schrift){ badge.style.color = f.schrift; }
       mitte.appendChild(badge);
       mitte.appendChild(document.createTextNode(
         ausfall ? "faellt aus"
@@ -327,6 +336,8 @@
       }
       zeichnen(kuenftig);
       status.style.display = "none";
+      var feld = document.getElementById("quelle");
+      if(feld){ feld.textContent = "Daten: " + quelle; }
     }).catch(function(){
       liste.innerHTML = "";
       status.style.display = "";
