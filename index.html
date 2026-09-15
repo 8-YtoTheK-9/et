@@ -154,9 +154,10 @@
 
 <script>
 (function(){
-  var VADUZ = "Triesen, Schule";
-  var MAUREN_VARIANTEN = ["Eschen, Kohlplatz", "Eschen FL, Kohlplatz", "Kohlplatz"];
+  var HALT_A = "Triesen, Schule";
+  var HALT_B_VARIANTEN = ["Eschen, Kohlplatz", "Eschen FL, Kohlplatz", "Kohlplatz"];
   var ANZAHL = 5;
+  var TAKT = 120000;
 
   var LINIENFARBEN = {
     "11": "#fcc300",
@@ -180,9 +181,51 @@
   function uhrzeit(d){ return zweistellig(d.getHours()) + ":" + zweistellig(d.getMinutes()); }
   function minutenBis(d){ return Math.round((d.getTime() - Date.now()) / 60000); }
 
-  function holen(mauren){
-    var von = richtungHin ? mauren : VADUZ;
-    var nach = richtungHin ? VADUZ : mauren;
+  function datumAus(text){
+    if(!text){ return null; }
+    return new Date(String(text).replace(" ", "T"));
+  }
+
+  function verspaetungAus(wert){
+    if(wert === null || wert === undefined || wert === ""){ return 0; }
+    if(wert === "X"){ return "X"; }
+    var zahl = parseInt(String(wert).replace("+", ""), 10);
+    return isNaN(zahl) ? 0 : zahl;
+  }
+
+  function linieAusText(text){
+    if(!text){ return "Bus"; }
+    var treffer = String(text).match(/[0-9]+[A-Z]?/);
+    return treffer ? treffer[0] : String(text);
+  }
+
+  // Quelle 1: search.ch, mit Echtzeitverspaetungen
+  function holenSearch(von, nach){
+    var url = "https://search.ch/timetable/api/route.json"
+      + "?from=" + encodeURIComponent(von)
+      + "&to=" + encodeURIComponent(nach)
+      + "&show_delays=1&num=" + ANZAHL;
+    return fetch(url).then(function(a){
+      if(!a.ok){ throw new Error("HTTP " + a.status); }
+      return a.json();
+    }).then(function(d){
+      if(!d || !d.connections || !d.connections.length){ throw new Error("leer"); }
+      return d.connections.map(function(v){
+        var fahrten = (v.legs || []).filter(function(l){ return l.type !== "walk" && l.departure && (l.line || l.name); });
+        var erste = fahrten[0] || (v.legs || [])[0] || {};
+        return {
+          ab: datumAus(v.departure),
+          an: datumAus(v.arrival),
+          verspaetung: verspaetungAus(v.dep_delay),
+          linie: linieAusText(erste.line || erste.name || erste.number),
+          umstiege: Math.max(fahrten.length - 1, 0)
+        };
+      });
+    });
+  }
+
+  // Quelle 2: transport.opendata.ch, nur Sollzeiten
+  function holenOpendata(von, nach){
     var url = "https://transport.opendata.ch/v1/connections"
       + "?from=" + encodeURIComponent(von)
       + "&to=" + encodeURIComponent(nach)
@@ -190,37 +233,51 @@
     return fetch(url).then(function(a){
       if(!a.ok){ throw new Error("HTTP " + a.status); }
       return a.json();
+    }).then(function(d){
+      if(!d || !d.connections || !d.connections.length){ throw new Error("leer"); }
+      return d.connections.map(function(v){
+        var abschnitt = (v.sections || []).find(function(s){ return s.journey; });
+        var journey = abschnitt && abschnitt.journey ? abschnitt.journey : {};
+        return {
+          ab: new Date(v.from.departure),
+          an: new Date(v.to.arrival),
+          verspaetung: v.from.delay || 0,
+          linie: String(journey.number || journey.category || "Bus"),
+          umstiege: v.transfers || 0
+        };
+      });
     });
   }
 
-  function holenMitVarianten(i){
+  function holen(i){
     i = i || 0;
-    if(i >= MAUREN_VARIANTEN.length){ return Promise.resolve({connections: []}); }
-    return holen(MAUREN_VARIANTEN[i]).then(function(d){
-      if(d.connections && d.connections.length){ return d; }
-      return holenMitVarianten(i + 1);
-    });
+    if(i >= HALT_B_VARIANTEN.length){ return Promise.reject(new Error("keine Haltestelle")); }
+    var b = HALT_B_VARIANTEN[i];
+    var von = richtungHin ? HALT_A : b;
+    var nach = richtungHin ? b : HALT_A;
+    return holenSearch(von, nach)
+      .catch(function(){ return holenOpendata(von, nach); })
+      .catch(function(){ return holen(i + 1); });
   }
 
-  function zeichnen(verbindungen){
+  function zeichnen(fahrten){
     liste.innerHTML = "";
-    verbindungen.forEach(function(v){
-      var ab = new Date(v.from.departure);
-      var an = new Date(v.to.arrival);
-      var abschnitt = (v.sections || []).find(function(s){ return s.journey; });
-      var linie = abschnitt && abschnitt.journey ? (abschnitt.journey.number || abschnitt.journey.category || "Bus") : "Bus";
-      var umstiege = v.transfers || 0;
-      var minuten = minutenBis(ab);
+    fahrten.forEach(function(f){
+      var ausfall = f.verspaetung === "X";
+      var minuten = minutenBis(f.ab);
 
       var eintrag = document.createElement("li");
 
       var zeit = document.createElement("span");
       zeit.className = "zeit";
-      zeit.textContent = uhrzeit(ab);
-      if(v.from.delay){
+      zeit.textContent = uhrzeit(f.ab);
+      if(ausfall){
+        zeit.style.textDecoration = "line-through";
+        zeit.style.color = "#b4381f";
+      } else if(f.verspaetung > 0){
         var vs = document.createElement("span");
         vs.className = "verspaetung";
-        vs.textContent = "+" + v.from.delay;
+        vs.textContent = "+" + f.verspaetung;
         zeit.appendChild(vs);
       }
 
@@ -228,16 +285,24 @@
       mitte.className = "mitte";
       var badge = document.createElement("span");
       badge.className = "linie";
-      badge.textContent = linie;
-      badge.style.background = LINIENFARBEN[String(linie)] || STANDARDFARBE;
+      badge.textContent = f.linie;
+      badge.style.background = LINIENFARBEN[String(f.linie)] || STANDARDFARBE;
       mitte.appendChild(badge);
       mitte.appendChild(document.createTextNode(
-        "an " + uhrzeit(an) + (umstiege ? ", " + umstiege + "x umsteigen" : ", direkt")
+        ausfall ? "faellt aus"
+                : "an " + uhrzeit(f.an) + (f.umstiege ? ", " + f.umstiege + "x umsteigen" : ", direkt")
       ));
 
       var rest = document.createElement("span");
       rest.className = "abfahrt-in";
-      rest.textContent = minuten <= 0 ? "jetzt" : "in " + minuten + " Min.";
+      if(ausfall){
+        rest.textContent = "";
+      } else if(f.verspaetung > 0){
+        rest.textContent = "in " + Math.max(minuten + f.verspaetung, 0) + " Min.";
+        rest.style.color = "#b4381f";
+      } else {
+        rest.textContent = minuten <= 0 ? "jetzt" : "in " + minuten + " Min.";
+      }
 
       eintrag.appendChild(zeit);
       eintrag.appendChild(mitte);
@@ -248,37 +313,34 @@
 
   function laden(){
     jetztFeld.textContent = uhrzeit(new Date()) + " Uhr";
-    titel.textContent = richtungHin
-      ? "Eschen Kohlplatz → Triesen Schule"
-      : "Triesen Schule → Eschen Kohlplatz";
+    titel.textContent = richtungHin ? "Eschen Kohlplatz → Triesen Schule" : "Triesen Schule → Eschen Kohlplatz";
     knopfHin.setAttribute("aria-pressed", richtungHin ? "true" : "false");
     knopfZurueck.setAttribute("aria-pressed", richtungHin ? "false" : "true");
 
-    holenMitVarianten().then(function(d){
-      var verbindungen = (d.connections || []).filter(function(v){
-        return minutenBis(new Date(v.from.departure)) >= 0;
-      });
-      if(!verbindungen.length){
+    holen().then(function(fahrten){
+      var kuenftig = fahrten.filter(function(f){ return f.ab && minutenBis(f.ab) >= -1; });
+      if(!kuenftig.length){
         liste.innerHTML = "";
         status.style.display = "";
         status.textContent = "Zurzeit keine Verbindung gefunden.";
         return;
       }
-      zeichnen(verbindungen);
+      zeichnen(kuenftig);
       status.style.display = "none";
     }).catch(function(){
       liste.innerHTML = "";
       status.style.display = "";
-      status.innerHTML = 'Keine Verbindung zum Fahrplan. <a href="https://liemobil.li/de/fahrplan#fahrplanabfrage">LIEmobil öffnen</a>';
+      status.innerHTML = 'Keine Verbindung zum Fahrplan. <a href="https://liemobil.li/de/fahrplan#fahrplanabfrage">LIEmobil oeffnen</a>';
     });
   }
 
   function wechseln(hin){
-    if(richtungHin === hin){ laden(); return; }
-    richtungHin = hin;
-    liste.innerHTML = "";
-    status.style.display = "";
-    status.textContent = "Verbindungen werden geladen.";
+    if(richtungHin !== hin){
+      richtungHin = hin;
+      liste.innerHTML = "";
+      status.style.display = "";
+      status.textContent = "Verbindungen werden geladen.";
+    }
     laden();
   }
 
@@ -290,7 +352,7 @@
   });
 
   laden();
-  setInterval(laden, 60000);
+  setInterval(laden, TAKT);
 })();
 </script>
 
