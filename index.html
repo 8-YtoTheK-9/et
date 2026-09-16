@@ -92,7 +92,16 @@
     font-variant-numeric:tabular-nums;
     white-space:nowrap;
   }
-  .verspaetung{color:#b4381f;font-size:.5em;font-weight:700;margin-left:3px}
+  .verspaetung{
+    display:inline-block;
+    width:2.0em;
+    color:#b4381f;
+    font-size:.82em;
+    font-weight:700;
+    line-height:1;
+    text-align:left;
+    flex:0 0 auto;
+  }
   .mitte{font-size:15px;color:var(--grau);flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .linie{
     display:inline-block;
@@ -218,8 +227,11 @@
       if(!d || !d.verbindungen || !d.verbindungen.length){ throw new Error("leer"); }
       quelle = "Echtzeit (OJP)";
       return d.verbindungen.map(function(v){
+        var soll = new Date(v.abfahrt);
+        var ist = v.abfahrt_ist ? new Date(v.abfahrt_ist) : soll;
         return {
-          ab: new Date(v.abfahrt),
+          ab: soll,
+          ab_ist: ist,
           an: new Date(v.ankunft),
           verspaetung: v.verspaetung || 0,
           linie: String(v.linie || "Bus"),
@@ -246,8 +258,10 @@
       return d.connections.map(function(v){
         var abschnitt = (v.sections || []).find(function(s){ return s.journey; });
         var journey = abschnitt && abschnitt.journey ? abschnitt.journey : {};
+        var sollOd = new Date(v.from.departure);
         return {
-          ab: new Date(v.from.departure),
+          ab: sollOd,
+          ab_ist: new Date(sollOd.getTime() + (v.from.delay || 0) * 60000),
           an: new Date(v.to.arrival),
           verspaetung: v.from.delay || 0,
           linie: String(journey.number || journey.category || "Bus"),
@@ -272,22 +286,26 @@
     liste.innerHTML = "";
     fahrten.forEach(function(f){
       var ausfall = f.verspaetung === "X";
-      var minuten = minutenBis(f.ab);
+      var minuten = minutenBis(f.ab_ist || f.ab);
 
       var eintrag = document.createElement("li");
 
       var zeit = document.createElement("span");
       zeit.className = "zeit";
-      zeit.textContent = uhrzeit(f.ab);
+      // Bei Verspaetung steht links die tatsaechliche Abfahrtszeit
+      zeit.textContent = uhrzeit((!ausfall && f.verspaetung > 0 && f.ab_ist) ? f.ab_ist : f.ab);
       if(ausfall){
         zeit.style.textDecoration = "line-through";
         zeit.style.color = "#b4381f";
       } else if(f.verspaetung > 0){
-        var vs = document.createElement("span");
-        vs.className = "verspaetung";
-        vs.textContent = "+" + f.verspaetung;
-        zeit.appendChild(vs);
+        zeit.style.color = "#b4381f";
+        zeit.title = "Fahrplan " + uhrzeit(f.ab) + ", Verspaetung " + f.verspaetung + " Min.";
       }
+
+      var vs = document.createElement("span");
+      vs.className = "verspaetung";
+      vs.textContent = (!ausfall && f.verspaetung > 0) ? "+" + f.verspaetung : "";
+      vs.title = vs.textContent ? "statt " + uhrzeit(f.ab) : "";
 
       var mitte = document.createElement("span");
       mitte.className = "mitte";
@@ -306,14 +324,13 @@
       rest.className = "abfahrt-in";
       if(ausfall){
         rest.textContent = "";
-      } else if(f.verspaetung > 0){
-        rest.textContent = "in " + Math.max(minuten + f.verspaetung, 0) + " Min.";
-        rest.style.color = "#b4381f";
       } else {
         rest.textContent = minuten <= 0 ? "jetzt" : "in " + minuten + " Min.";
+        if(f.verspaetung > 0){ rest.style.color = "#b4381f"; }
       }
 
       eintrag.appendChild(zeit);
+      eintrag.appendChild(vs);
       eintrag.appendChild(mitte);
       eintrag.appendChild(rest);
       liste.appendChild(eintrag);
@@ -327,7 +344,7 @@
     knopfZurueck.setAttribute("aria-pressed", richtungHin ? "false" : "true");
 
     holen().then(function(fahrten){
-      var kuenftig = fahrten.filter(function(f){ return f.ab && minutenBis(f.ab) >= -1; });
+      var kuenftig = fahrten.filter(function(f){ return f.ab && minutenBis(f.ab_ist || f.ab) >= 0; });
       if(!kuenftig.length){
         liste.innerHTML = "";
         status.style.display = "";
